@@ -61,7 +61,7 @@
     </header>
 
     <div class="banner" id="banner">
-      <div id="statusDot" class="status-dot" style="background:#ff5252"></div>
+      <div id="statusDot" class="status-dot" style="background:var(--danger)"></div>
       <div class="status-text" id="statusText">Disconnected</div>
       <div style="flex:1"></div>
       <div class="small" id="deviceName">No device</div>
@@ -74,3 +74,129 @@
       </div>
 
       <div class="row">
+        <div class="card" style="flex:1;min-width:260px">
+          <div class="small">Battery</div>
+          <div style="height:8px"></div>
+          <div class="battery-bar" aria-hidden="true">
+            <div id="batteryFill" class="battery-fill"></div>
+          </div>
+          <div style="height:8px"></div>
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <div id="batteryText">--%</div>
+            <div class="small" id="lastUpdate">Last update --</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="small">Temperature</div>
+          <div style="height:8px"></div>
+          <div class="temp-box">
+            <div id="tempValue" style="font-size:20px">--</div>
+            <div class="small" id="tempUnit">°C</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="small">Connection</div>
+          <div style="height:8px"></div>
+          <div id="rssiText">RSSI --</div>
+          <div style="height:8px"></div>
+          <div id="errorText" class="small" style="color:var(--danger)"></div>
+        </div>
+      </div>
+    </main>
+
+    <footer>
+      <div class="small">Run from a secure origin. Web Bluetooth works in Chromium browsers and requires HTTPS or localhost.</div>
+    </footer>
+  </div>
+
+  <script>
+  // Fixed Web Bluetooth dashboard for Segway ZT3 (single-file)
+  // Serve from https or localhost. If you know the service/characteristic UUIDs, set them below.
+  const SERVICE_UUID = null; // e.g. '0000xxxx-0000-1000-8000-00805f9b34fb'
+  const TELEMETRY_CHAR_UUID = null; // e.g. '0000yyyy-0000-1000-8000-00805f9b34fb'
+
+  // UI elements
+  const scanBtn = document.getElementById('scanBtn');
+  const disconnectBtn = document.getElementById('disconnectBtn');
+  const statusDot = document.getElementById('statusDot');
+  const statusText = document.getElementById('statusText');
+  const deviceNameEl = document.getElementById('deviceName');
+  const speedDisplay = document.getElementById('speedDisplay');
+  const speedUnit = document.getElementById('speedUnit');
+  const batteryFill = document.getElementById('batteryFill');
+  const batteryText = document.getElementById('batteryText');
+  const tempValue = document.getElementById('tempValue');
+  const tempUnit = document.getElementById('tempUnit');
+  const lastUpdate = document.getElementById('lastUpdate');
+  const rssiText = document.getElementById('rssiText');
+  const errorText = document.getElementById('errorText');
+  const unitSpeed = document.getElementById('unitSpeed');
+  const unitTemp = document.getElementById('unitTemp');
+
+  // State
+  let device = null;
+  let server = null;
+  let telemetryChar = null;
+  let reconnectAttempts = 0;
+  let userDisconnected = false;
+  let lastValidTelemetry = null;
+  let parseErrorCount = 0;
+  let updateTimer = null;
+  let latestRaw = null;
+  let adaptiveInterval = 100; // ms target ~10Hz
+  const stationaryThresholdKmh = 1.0;
+
+  // UI helpers
+  function setStatus(state, name = '') {
+    deviceNameEl.textContent = name || 'No device';
+    statusText.textContent = state;
+    if (state === 'Connected') {
+      statusDot.style.background = 'var(--accent)';
+    } else if (state === 'Connecting') {
+      statusDot.style.background = '#ffb300';
+    } else {
+      statusDot.style.background = 'var(--danger)';
+    }
+  }
+
+  function setError(msg) {
+    errorText.textContent = msg || '';
+  }
+
+  function formatSpeed(kmh) {
+    if (kmh == null) return '--';
+    if (unitSpeed.checked) {
+      const mph = kmh * 0.621371;
+      return mph.toFixed(1);
+    } else {
+      return kmh.toFixed(1);
+    }
+  }
+
+  function formatTemp(c) {
+    if (c == null) return '--';
+    if (unitTemp.checked) {
+      const f = c * 9/5 + 32;
+      return f.toFixed(1);
+    } else {
+      return c.toFixed(1);
+    }
+  }
+
+  // Defensive parser (example). Replace with real packet format if available.
+  function parseTelemetry(bytes) {
+    if (!bytes || bytes.length < 6) throw new Error('Packet too short');
+    const b = (bytes instanceof Uint8Array) ? bytes : new Uint8Array(bytes);
+    if (b[0] !== 0xAA) throw new Error('Invalid header');
+    let sum = 0;
+    for (let i = 0; i < b.length - 1; i++) sum = (sum + b[i]) & 0xFF;
+    if (sum !== b[b.length - 1]) throw new Error('Checksum mismatch');
+    const speedRaw = (b[2] << 8) | b[1];
+    const speedKmh = speedRaw / 100.0;
+    const battery = b[3];
+    let tempSigned = b[4];
+    if (tempSigned > 127) tempSigned = tempSigned - 256;
+    const tempC = tempSigned;
+    const validSpeed = (speedKmh >= 0 && speed
