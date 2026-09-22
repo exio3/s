@@ -1,0 +1,318 @@
+<script>
+/*
+  Pairing hint + defensive reconnect logic for Segway ZT3 dashboard.
+  Shows "Press power button once" when scanning or when quick disconnects happen.
+  Keep SERVICE_UUID / TELEMETRY_CHAR_UUID as null if unknown.
+*/
+
+const SERVICE_UUID = null;
+const TELEMETRY_CHAR_UUID = null;
+
+const scanBtn = document.getElementById('scanBtn');
+const disconnectBtn = document.getElementById('disconnectBtn');
+const statusText = document.getElementById('statusText');
+const deviceNameEl = document.getElementById('deviceName');
+const errorText = document.getElementById('errorText');
+const banner = document.getElementById('banner');
+const speedDisplay = document.getElementById('speedDisplay');
+const speedUnit = document.getElementById('speedUnit');
+const batteryFill = document.getElementById('batteryFill');
+const batteryText = document.getElementById('batteryText');
+const tempValue = document.getElementById('tempValue');
+const tempUnit = document.getElementById('tempUnit');
+const lastUpdate = document.getElementById('lastUpdate');
+
+let device = null;
+let server = null;
+let telemetryChar = null;
+let reconnectTimer = null;
+let reconnectAttempts = 0;
+let userDisconnected = false;
+let latestRaw = null;
+let lastValidTelemetry = null;
+let parseErrorCount = 0;
+let updateIntervalMs = 100;
+let updateTimerId = null;
+let lastDisconnectTime = 0;
+const QUICK_DISCONNECT_WINDOW_MS = 3000; // if disconnect happens within 3s of connect, treat as quick
+const QUICK_DISCONNECT_THRESHOLD = 3; // after this many quick disconnects show hint
+let quickDisconnectCount = 0;
+const stationaryThresholdKmh = 1.0;
+
+// Small helper to show pairing hint in the banner
+function showPairingHint(show) {
+  // create hint element if missing
+  let hint = document.getElementById('pairHint');
+  if (!hint) {
+    hint = document.createElement('div');
+    hint.id = 'pairHint';
+    hint.style.marginLeft = '12px';
+    hint.style.fontSize = '13px';
+    hint.style.color = '#ffd54f';
+    banner.appendChild(hint);
+  }
+  hint.textContent = show ? 'Tip: Press the scooter power button once to enable pairing, then click Scan & Connect.' : '';
+}
+
+function setStatus(text, name='') {
+  deviceNameEl.textContent = name || 'No device';
+  statusText.textContent = text;
+}
+function setError(msg){ errorText.textContent = msg || ''; }
+
+function formatSpeed(kmh){
+  if (kmh == null) return '--';
+  const useMph = document.getElementById('unitSpeed')?.checked;
+  return useMph ? (kmh * 0.621371).toFixed(1) : kmh.toFixed(1);
+}
+function formatTemp(c){
+  if (c == null) return '--';
+  const useF = document.getElementById('unitTemp')?.checked;
+  return useF ? (c * 9/5 + 32).toFixed(1) : c.toFixed(1);
+}
+
+// Defensive parser (example format)
+function parseTelemetry(bytes){
+  if (!bytes || bytes.length < 6) throw new Error('Packet too short');
+  const b = (bytes instanceof Uint8Array) ? bytes : new Uint8Array(bytes);
+  if (b[0] !== 0xAA) throw new Error('Invalid header');
+  let sum = 0;
+  for (let i=0;i<b.length-1;i++) sum = (sum + b[i]) & 0xFF;
+  if (sum !== b[b.length-1]) throw new Error('Checksum mismatch');
+  const speedRaw = (b[2] << 8) | b[1];
+  const speedKmh = speedRaw / 100.0;
+  const battery = b[3];
+  let tempSigned = b[4];
+  if (tempSigned > 127) tempSigned -= 256;
+  const tempC = tempSigned;
+  const validSpeed = (speedKmh >= 0 && speedKmh <= 200) ? speedKmh : null;
+  const validBattery = (battery >= 0 && battery <= 100) ? battery : null;
+  const validTemp = (tempC >= -40 && tempC <= 120) ? tempC : null;
+  return { speedKmh: validSpeed, batteryPercent: validBattery, temperatureC: validTemp, timestamp: new Date() };
+}
+
+function updateUI(t){
+  if (!t) return;
+  lastValidTelemetry = t;
+  speedDisplay.textContent = formatSpeed(t.speedKmh);
+  speedUnit.textContent = document.getElementById('unitSpeed')?.checked ? 'mph' : 'km/h';
+  batteryText.textContent = (t.batteryPercent != null) ? `${t.batteryPercent}%` : '--';
+  batteryFill.style.width = (t.batteryPercent != null) ? `${t.batteryPercent}%` : '0%';
+  batteryFill.style.background = (t.batteryPercent != null && t.batteryPercent > 20) ? 'linear-gradient(90deg,#00e676,#66ffa6)' : 'linear-gradient(90deg,#ff5252,#ff8a80)';
+  tempValue.textContent = formatTemp(t.temperatureC);
+  tempUnit.textContent = document.getElementById('unitTemp')?.checked ? '°F' : '°C';
+  lastUpdate.textContent = `Last update ${t.timestamp.toLocaleTimeString()}`;
+}
+
+function startUpdateTimer(){
+  if (updateTimerId !== null) clearInterval(updateTimerId);
+  updateTimerId = setInterval(() => {
+    if (!latestRaw) return;
+    try {
+      const parsed = parseTelemetry(latestRaw);
+      updateUI(parsed);
+      const speed = parsed.speedKmh ?? 0;
+      const desired = (speed < stationaryThresholdKmh) ? 1000 : 100;
+      if (desired !== updateIntervalMs) {
+        updateIntervalMs = desired;
+        clearInterval(updateTimerId);
+        startUpdateTimer();
+      }
+    } catch (e) {
+      parseErrorCount++;
+      setError('Parse errors: ' + parseErrorCount);
+    } finally {
+      latestRaw = null;
+    }
+  }, updateIntervalMs);
+}
+
+function onCharacteristicValueChanged(event){
+  try {
+    const dv = event.target && event.target.value ? event.target.value : null;
+    if (!dv) return;
+    const arr = new Uint8Array(dv.buffer.slice(dv.byteOffset, dv.byteOffset + dv.byteLength));
+    latestRaw = arr;
+  } catch (e) {
+    // swallow
+  }
+}
+
+async function connectAndSubscribe(selectedDevice){
+  try {
+    setStatus('Connecting', selectedDevice.name || selectedDevice.id);
+    device = selectedDevice;
+    deviceNameEl.textContent = device.name || device.id;
+
+    try { device.removeEventListener('gattserverdisconnected', onDisconnected); } catch(e){}
+    device.addEventListener('gattserverdisconnected', onDisconnected);
+
+    if (!device.gatt) throw new Error('GATT not available');
+    const connectStart = Date.now();
+    server = await device.gatt.connect();
+    setStatus('Connected', device.name || device.id);
+    reconnectAttempts = 0;
+    setError('');
+    showPairingHint(false);
+
+    // find characteristic
+    let char = null;
+    if (SERVICE_UUID && TELEMETRY_CHAR_UUID) {
+      try {
+        const svc = await server.getPrimaryService(SERVICE_UUID);
+        char = await svc.getCharacteristic(TELEMETRY_CHAR_UUID);
+      } catch (e) {}
+    }
+    if (!char) {
+      const services = await server.getPrimaryServices();
+      for (const s of services) {
+        try {
+          const chars = await s.getCharacteristics();
+          for (const c of chars) {
+            if (c.properties && (c.properties.notify || c.properties.indicate)) {
+              char = c; break;
+            }
+          }
+          if (char) break;
+        } catch (e) {}
+      }
+    }
+    if (!char) { setError('Telemetry characteristic not found'); return; }
+    telemetryChar = char;
+    try { telemetryChar.removeEventListener('characteristicvaluechanged', onCharacteristicValueChanged); } catch(e){}
+    await telemetryChar.startNotifications();
+    telemetryChar.addEventListener('characteristicvaluechanged', onCharacteristicValueChanged);
+
+    // reset quick disconnect tracking on successful connect
+    quickDisconnectCount = 0;
+    lastDisconnectTime = 0;
+    if (updateTimerId === null) startUpdateTimer();
+  } catch (e) {
+    setError('Connection failed: ' + (e && e.message ? e.message : 'unknown'));
+    scheduleReconnect();
+  }
+}
+
+function onDisconnected(){
+  const now = Date.now();
+  setStatus('Disconnected');
+  setError('Device disconnected');
+  // detect quick disconnects
+  if (lastDisconnectTime === 0 || (now - lastDisconnectTime) > QUICK_DISCONNECT_WINDOW_MS) {
+    // reset window
+    quickDisconnectCount = 1;
+  } else {
+    quickDisconnectCount++;
+  }
+  lastDisconnectTime = now;
+
+  // if we see repeated quick disconnects, show the press-power hint
+  if (quickDisconnectCount >= QUICK_DISCONNECT_THRESHOLD) {
+    showPairingHint(true);
+  }
+
+  if (!userDisconnected) scheduleReconnect();
+}
+
+function computeBackoff(attempts){
+  if (attempts <= 3) return attempts * 1000;
+  if (attempts <= 6) return (attempts - 2) * 5000;
+  return 30000;
+}
+
+function scheduleReconnect(){
+  reconnectAttempts++;
+  const backoff = computeBackoff(reconnectAttempts);
+  setError(`Reconnecting in ${Math.round(backoff/1000)}s`);
+  if (reconnectTimer) clearTimeout(reconnectTimer);
+  reconnectTimer = setTimeout(async () => {
+    if (!device) return;
+    try {
+      if (device.gatt && !device.gatt.connected) {
+        await connectAndSubscribe(device);
+      } else {
+        // cannot auto-reconnect in this state; prompt user
+        setError('Automatic reconnect unavailable; press Scan & Connect and press the scooter power button once.');
+        showPairingHint(true);
+      }
+    } catch (e) {
+      scheduleReconnect();
+    }
+  }, backoff);
+}
+
+async function startScanAndConnect(){
+  try {
+    if (!navigator.bluetooth) { setError('Web Bluetooth not supported'); return; }
+    userDisconnected = false;
+    setError('');
+    setStatus('Scanning');
+    // show hint proactively because many scooters require a single press to enter pairing
+    showPairingHint(true);
+
+    const options = {};
+    if (SERVICE_UUID) {
+      options.filters = [{ services: [SERVICE_UUID] }];
+      options.optionalServices = [SERVICE_UUID];
+    } else {
+      options.acceptAllDevices = true;
+    }
+    const dev = await navigator.bluetooth.requestDevice(options);
+    if (!dev) { setStatus('Disconnected'); return; }
+    await connectAndSubscribe(dev);
+  } catch (e) {
+    setStatus('Disconnected');
+    setError(e && e.message ? e.message : 'Scan/connect failed');
+  }
+}
+
+async function disconnect(){
+  userDisconnected = true;
+  setError('');
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  try {
+    if (telemetryChar) {
+      try { await telemetryChar.stopNotifications(); } catch(e){}
+      try { telemetryChar.removeEventListener('characteristicvaluechanged', onCharacteristicValueChanged); } catch(e){}
+      telemetryChar = null;
+    }
+    if (device && device.gatt && device.gatt.connected) {
+      try { device.gatt.disconnect(); } catch(e){}
+    }
+  } catch (e) {}
+  device = null;
+  server = null;
+  setStatus('Disconnected');
+  showPairingHint(false);
+}
+
+// wire UI
+scanBtn.addEventListener('click', async () => { await startScanAndConnect(); });
+disconnectBtn.addEventListener('click', async () => { await disconnect(); });
+document.getElementById('unitSpeed')?.addEventListener('change', () => {
+  speedDisplay.textContent = formatSpeed(lastValidTelemetry?.speedKmh);
+  speedUnit.textContent = document.getElementById('unitSpeed')?.checked ? 'mph' : 'km/h';
+});
+document.getElementById('unitTemp')?.addEventListener('change', () => {
+  tempValue.textContent = formatTemp(lastValidTelemetry?.temperatureC);
+  tempUnit.textContent = document.getElementById('unitTemp')?.checked ? '°F' : '°C';
+});
+
+// load prefs
+try {
+  const m = localStorage.getItem('useMph');
+  const t = localStorage.getItem('useF');
+  if (m === '1') document.getElementById('unitSpeed').checked = true;
+  if (t === '1') document.getElementById('unitTemp').checked = true;
+} catch(e){}
+
+// init
+setStatus('Disconnected');
+if (!navigator.bluetooth) {
+  setError('Web Bluetooth not supported in this browser');
+  scanBtn.disabled = true;
+} else {
+  // no-op
+}
+startUpdateTimer();
+</script>
