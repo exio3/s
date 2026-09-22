@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Segway ZT3 Dashboard</title>
+  <style>
+    :root{
+      --bg:#000;
+      --fg:#fff;
+      --muted:#bdbdbd;
+      --accent:#00e676;
+      --danger:#ff5252;
+      --panel:#111;
+    }
+    html,body{height:100%;margin:0;background:var(--bg);color:var(--fg);font-family:Inter,Segoe UI,Roboto,Arial,sans-serif}
+    .app{display:flex;flex-direction:column;height:100%}
+    header{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;background:linear-gradient(180deg,#0b0b0b,#111);border-bottom:1px solid #222}
+    header h1{font-size:18px;margin:0;font-weight:600}
+    .controls{display:flex;gap:8px;align-items:center}
+    button{background:#222;color:var(--fg);border:1px solid #333;padding:8px 12px;border-radius:8px;cursor:pointer}
+    button.primary{background:var(--accent);color:#000;border:none}
+    .banner{display:flex;align-items:center;gap:8px;padding:8px 12px;background:rgba(255,255,255,0.02);border-bottom:1px solid #222}
+    .status-dot{width:12px;height:12px;border-radius:50%}
+    .status-text{font-weight:600}
+    main{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:18px}
+    .speed{font-size:96px;font-weight:800;letter-spacing: -2px}
+    .unit{font-size:20px;color:var(--muted);margin-top:6px}
+    .row{display:flex;gap:20px;align-items:center;margin-top:28px}
+    .card{background:var(--panel);padding:12px;border-radius:12px;min-width:180px}
+    .battery-bar{width:220px;height:14px;background:#222;border-radius:8px;overflow:hidden}
+    .battery-fill{height:100%;background:linear-gradient(90deg,var(--accent),#66ffa6);width:0%}
+    .temp-box{padding:8px 12px;border-radius:8px;background:#0f0f0f;text-align:center}
+    .small{font-size:13px;color:var(--muted)}
+    footer{padding:10px 16px;text-align:center;color:var(--muted);font-size:13px}
+    .warning{color:var(--danger);font-weight:700}
+    .toggle{display:flex;align-items:center;gap:8px}
+    .hidden{display:none}
+    @media (max-width:520px){
+      .speed{font-size:64px}
+      .battery-bar{width:160px}
+    }
+  </style>
+</head>
+<body>
+  <div class="app" role="application" aria-label="Segway ZT3 Dashboard">
+    <header>
+      <h1>Segway ZT3 Dashboard</h1>
+      <div class="controls">
+        <button id="scanBtn" class="primary">Scan and Connect</button>
+        <button id="disconnectBtn">Disconnect</button>
+        <div class="toggle">
+          <label class="small">mph</label>
+          <input type="checkbox" id="unitSpeed" aria-label="Toggle mph" />
+        </div>
+        <div class="toggle">
+          <label class="small">°F</label>
+          <input type="checkbox" id="unitTemp" aria-label="Toggle Fahrenheit" />
+        </div>
+      </div>
+    </header>
+
+    <div class="banner" id="banner">
+      <div id="statusDot" class="status-dot" style="background:#ff5252"></div>
+      <div class="status-text" id="statusText">Disconnected</div>
+      <div style="flex:1"></div>
+      <div class="small" id="deviceName">No device</div>
+    </div>
+
+    <main>
+      <div style="text-align:center">
+        <div class="speed" id="speedDisplay">--</div>
+        <div class="unit" id="speedUnit">km/h</div>
+      </div>
+
+      <div class="row">
